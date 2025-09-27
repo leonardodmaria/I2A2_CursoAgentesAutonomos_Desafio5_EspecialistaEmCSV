@@ -11,6 +11,8 @@ import streamlit as st
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
+from pandas.core.interchange.dataframe_protocol import DataFrame
+
 """
 import os
 from dotenv import load_dotenv
@@ -139,7 +141,24 @@ class CSVAIAgent:
 
     def get_recent_history(self, n: int = 5) -> str:
         recent = self.memory[-n:]
-        return "\n".join([f"Q: {m['question']}\nA: {m['answer']}" for m in recent])
+        history = "\n".join([f"Pergunta do usuário: {m['question']}\nResposta do agente: {m['answer']}\n" for m in recent])
+        return history
+
+
+    def get_context(self, df: DataFrame) -> str:
+        df_info = f"""
+        O DataFrame tem {len(self.df)} linhas e {len(self.df.columns)} colunas.
+        
+        O nome de cada coluna do DataFrame é: "{', '.join(self.df.columns.tolist())}"
+        
+        Amostra (Primeiras 3 linhas):
+        {self.df.head(3).to_string()}
+        """
+        # Limitar tamanho
+        df_info = df_info[:2000] + ("..." if len(df_info) > 2000 else "")
+
+        # Retornar
+        return df_info
 
 
     # ---------------------------
@@ -228,19 +247,21 @@ class CSVAIAgent:
         if self.df is None:
             return False
 
-        df_cols = ", ".join(self.df.columns.tolist())
-        df_shape = f"{len(self.df)} linhas, {len(self.df.columns)} colunas."
+        # df_cols = ", ".join(self.df.columns.tolist())
+        # df_shape = f"{len(self.df)} linhas, {len(self.df.columns)} colunas."
 
         prompt_relevance = f"""
         Você é um avaliador numérico de relevância.
         
         Tarefa: Avalie a relevância da pergunta do usuário para o arquivo CSV em uma escala de 1 (totalmente irrelevante) a 10 (altamente relevante).
 
-        Contexto do CSV: O arquivo tem dados com as seguintes colunas:
-        "{df_cols}"
+        Informações sobre o DataFrame:
+        "{self.get_context(self.df)}"
         
-        Tamanho do DataFrame:
-        "{df_shape}"
+        Histórico de perguntas e respostas:
+        "{self.get_recent_history()}"
+        
+        Qualquer referência explícita a um nome de coluna é relevante.
         
         Perguntas consideradas altamente relevantes:
         "Quais são os tipos de dados (numéricos, categóricos) do arquivo/planilha?"
@@ -263,6 +284,7 @@ class CSVAIAgent:
         "Qual o tamanho do arquivo/planilha?"
         "Qual sua conclusão sobre o arquivo/planilha?"
         "Com base no histórico de perguntas, qual sua conclusão?"
+        "Quais foram as perguntas feitas até agora?"
 
         Instrução: Responda APENAS com um número inteiro entre 1 e 10 (exemplo de resposta: 5).
 
@@ -287,6 +309,7 @@ class CSVAIAgent:
             match = re.search(r'\d+', answer)
             if match:
                 relevance_score = int(match.group(0))
+                print("Prompt da avaliação da pergunta:\n\n" + prompt_relevance)
                 print("Relevância da pergunta (de 0 a 10): " + str(relevance_score))
                 # Defina o limiar de corte
                 return relevance_score >= 3
@@ -334,7 +357,7 @@ class CSVAIAgent:
             sys.stdout = old_stdout
 
 
-    def ask_chatgpt(self, question: str, context: str = "", memory_top_k: int = 5) -> str:
+    def ask_chatgpt(self, question: str) -> str:
 
         if not isinstance(question, str):
             question = str(question)
@@ -347,6 +370,7 @@ class CSVAIAgent:
         if not self.is_question_relevant(question):
             return "Desculpe, só posso responder a perguntas relacionadas ao arquivo CSV carregado..."
 
+        '''
         # 3) Preparar contexto do DataFrame
         try:
             df_info = f"""
@@ -361,19 +385,22 @@ class CSVAIAgent:
             df_info = df_info[:2000] + ("..." if len(df_info) > 2000 else "")
         except Exception:
             df_info = f"DataFrame com {len(self.df)} linhas e colunas: {', '.join(self.df.columns.tolist())}"
+        '''
 
+        '''
         # 4) Buscar histórico relevante (últimas interações)
         history_context = self.get_recent_history(memory_top_k)
+        '''
 
-        # 5) Construir prompt
+        # 5) Construir prompt final
 
-        prompt = f"""Você é um especialista em análise de dados CSV. Responda à pergunta do usuário de forma clara e objetiva.
+        prompt = f"""Você é especialista em análise de dados de uma planilha CSV. Use a variável 'df' (o DataFrame extraído do CSV). Responda à pergunta do usuário de forma clara e objetiva.
 
-        Informações do DataFrame:
-        "{df_info}"
+        Informações sobre o DataFrame:
+        "{self.get_context(self.df)}"
         
         Histórico de perguntas e respostas:
-        "{history_context}"
+        "{self.get_recent_history()}"
         
         Pergunta do usuário:
         "{question}"
@@ -382,22 +409,23 @@ class CSVAIAgent:
 
         # Gerar código python
         code_generation_prompt = f"""
-            Você é um especialista em Python/Pandas. Sua única função é analisar dados.
-            Use a variável 'df' (o DataFrame).
+            Você é um especialista em Python/Pandas. Sua única função é analisar dados. Use a variável 'df' (o DataFrame extraído do CSV).
 
             Instrução: Gere APENAS o código Python (dentro de um bloco markdown 'python')
             que responde à pergunta do usuário. O resultado final deve ser atribuído a
             uma variável chamada 'result' ou impresso no console.
 
-            Informações do DataFrame:
-            "{df_info}"
+            Informações sobre o DataFrame:
+            "{self.get_context(self.df)}"
             
             Histórico de perguntas e respostas:
-            "{history_context}"
+            "{self.get_recent_history()}"
             
             Pergunta do usuário:
             "{question}"
         """
+
+        print("Prompt do Python:\n\n" + code_generation_prompt)
 
         code_response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
@@ -422,21 +450,20 @@ class CSVAIAgent:
         # Verificar se resposta python será usada
         if is_error == False:
             # Incluir resposta da execução do python
-            print("Respondeu usando python")
-            prompt = prompt + "A resposta deve ser baseada EXCLUSIVAMENTE no resultado da execução do código Python/Pandas: " + execution_result
+            print("Responderá usando python")
+            prompt = prompt + 'Baseie sua resposta no resultado da execução do código Python gerado pela LLM:\n"' + execution_result + '"'
         else:
             # Não incluir
-            print("Respondeu usando linguística")
+            print("Responderá usando linguística")
 
         print("Prompt final:\n\n" + prompt)
-
 
         # 6) Usar a LLM - Resposta final
         try:
             response = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "Você é um especialista em análise de dados CSV."},
+                    {"role": "system", "content": "Você é especialista em análise de dados de uma planilha CSV."},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.1,  # Baixa temperatura para respostas consistentes
@@ -456,6 +483,7 @@ class CSVAIAgent:
     # ---------------------------
     # Análises básicas / gráficos
     # ---------------------------
+
     def basic_analysis(self):
         """Retorna tipos, nulos e estatísticas resumidas do DataFrame."""
         if self.df is None:
