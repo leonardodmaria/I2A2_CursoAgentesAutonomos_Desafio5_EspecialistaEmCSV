@@ -1,5 +1,8 @@
+import openai
 import streamlit as st
 from agent import CSVAIAgent
+
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 st.set_page_config(page_title="Agente CSV Inteligente", layout="wide")
 st.title("🤖 Agente Inteligente de Análise de CSV")

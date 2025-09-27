@@ -1,21 +1,24 @@
-# agent.py
-import os
 import io
 import csv
 import re
 import statistics
+import sys
+import openai
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import openai
-
+import streamlit as st
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+
+"""
+import os
 from dotenv import load_dotenv
-
-
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
+"""
+
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 # ---------------------------
 # Utilitários de CSV / decoding
@@ -131,12 +134,13 @@ class CSVAIAgent:
 
     def clear_memory(self):
         self.memory = []
+        
+    """
 
     def get_recent_history(self, n: int = 5) -> str:
         recent = self.memory[-n:]
         return "\n".join([f"Q: {m['question']}\nA: {m['answer']}" for m in recent])
-        
-    """
+
 
     # ---------------------------
     # Carregamento de CSV robusto
@@ -216,14 +220,122 @@ class CSVAIAgent:
 
         return df
 
-    # ---------------------------
-    # Integração com ChatGPT (memória + prompt)
-    # ---------------------------
+    # LLM
+    def is_question_relevant(self, question: str) -> bool:
+        """
+        Usa o LLM para classificar a relevância da pergunta em uma escala de 1 a 10.
+        """
+        if self.df is None:
+            return False
+
+        df_cols = ", ".join(self.df.columns.tolist())
+        df_shape = f"{len(self.df)} linhas, {len(self.df.columns)} colunas."
+
+        prompt_relevance = f"""
+        Você é um avaliador numérico de relevância.
+        
+        Tarefa: Avalie a relevância da pergunta do usuário para o arquivo CSV em uma escala de 1 (totalmente irrelevante) a 10 (altamente relevante).
+
+        Contexto do CSV: O arquivo tem dados com as seguintes colunas:
+        "{df_cols}"
+        
+        Tamanho do DataFrame:
+        "{df_shape}"
+        
+        Perguntas consideradas altamente relevantes:
+        "Quais são os tipos de dados (numéricos, categóricos) do arquivo/planilha?"
+        "Qual a distribuição de cada variável (histogramas, distribuições)?"
+        "Qual o intervalo de cada variável (mínimo, máximo)?"
+        "Quais são as medidas de tendência central (média, mediana)?"
+        "Qual a variabilidade dos dados (desvio padrão, variância)?"
+        "Existem padrões ou tendências temporais?"
+        "Quais os valores mais frequentes ou menos frequentes?"
+        "Existem agrupamentos (clusters) nos dados?"
+        "Existem valores atípicos nos dados?"
+        "Como esses outliers afetam a análise?"
+        "Podem ser removidos, transformados ou investigados?"
+        "Como as variáveis estão relacionadas umas com as outras? (Gráficos de dispersão, tabelas cruzadas)"
+        "Existe correlação entre as variáveis?"
+        "Quais variáveis parecem ter maior ou menor influência sobre outras?"
+        "Qual conclusão você pode tirar deste arquivo?"
+        "Quantas linhas tem o arquivo/planilha?"
+        "Quantas colunas tem o arquivo/planilha?"
+        "Qual o tamanho do arquivo/planilha?"
+        "Qual sua conclusão sobre o arquivo/planilha?"
+        "Com base no histórico de perguntas, qual sua conclusão?"
+
+        Instrução: Responda APENAS com um número inteiro entre 1 e 10 (exemplo de resposta: 5).
+
+        Pergunta do usuário:
+        "{question}"
+        """
+
+        try:
+            # Manter temperatura baixa para obter um número estável
+            response = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Você é um avaliador numérico de relevância."},
+                    {"role": "user", "content": prompt_relevance},
+                ],
+                temperature=0.0,
+                max_tokens=3  # Suficiente para um número (ex: 10)
+            )
+            answer = response.choices[0].message["content"].strip()
+
+            # Tentar extrair o número
+            match = re.search(r'\d+', answer)
+            if match:
+                relevance_score = int(match.group(0))
+                print("Relevância da pergunta (de 0 a 10): " + str(relevance_score))
+                # Defina o limiar de corte
+                return relevance_score >= 3
+
+            return False  # Se não conseguir extrair o número
+
+        except Exception:
+            # Em caso de falha, é mais seguro não responder
+            return False
+
+
+    def execute_code(self, code_string: str) -> str:
+        """Executa código Python no contexto do DataFrame de forma segura."""
+        if self.df is None:
+            return "Erro: DataFrame não carregado."
+        
+        # O dataframe deve estar disponível no ambiente de execução
+        local_vars = {'df': self.df}
+        
+        # Captura stdout
+        old_stdout = sys.stdout
+        redirected_output = io.StringIO()
+        sys.stdout = redirected_output
+        
+        try:
+            # Garante que o código é executado e o resultado final é capturado
+            exec(code_string, {}, local_vars)
+            
+            # Tenta pegar a última variável/resultado, se não houver print explícito
+            result = local_vars.get('result', None) or redirected_output.getvalue().strip()
+            
+            if result:
+                # Limita a saída para evitar sobrecarga de tokens (ex: print de DF completo)
+                result_str = str(result)
+                if len(result_str) > 2000:
+                    return f"Resultado (Parcial):\n{result_str[:2000]}..."
+                return f"Resultado:\n{result_str}"
+            
+            return "Execução bem-sucedida, sem saída explícita (pode ser atribuição de variável)."
+
+        except Exception as e:
+            return f"ERRO DE EXECUÇÃO: {type(e).__name__}: {str(e)}"
+            
+        finally:
+            sys.stdout = old_stdout
+
+
     def ask_chatgpt(self, question: str, context: str = "", memory_top_k: int = 5) -> str:
-        """
-        Responde perguntas sobre o arquivo CSV com memória do histórico.
-        Versão simplificada e eficiente.
-        """
+
         if not isinstance(question, str):
             question = str(question)
 
@@ -231,47 +343,16 @@ class CSVAIAgent:
         if self.df is None:
             return "Por favor, carregue um arquivo CSV antes de fazer perguntas."
 
-        # 2) Verificar se a pergunta é relacionada ao CSV
-        q_lower = question.lower().strip()
-
-        # Palavras-chave básicas
-        keywords = [
-            "coluna", "linha",
-            "media", "média", "mediana", "minimo", "mínimo", "maximo", "máximo",
-            "estatistica", "estatística",
-            "nulo", "valor",
-            "distribuicao", "distribuição",
-            "histograma", "grafico", "gráfico",
-            "correlacao", "correlação",
-            "cluster", "pca", "variancia", "variância",
-            "padrao", "padrão",
-            "outlier", "arquivo", "csv", "planilha", "dataset",
-            "dado", "dataframe",
-            "informacao", "informação",
-            "conteudo", "conteúdo", "resumo", "amostra",
-            "intervalo", "medida",
-            "variavel", "variável",
-            "atipico", "atípico", "frequente", "tendencia", "tendência",
-            "conclusão", "conclusao", "historico", "histórico",
-            "pergunta", "resposta", "palavra"
-        ]
-
-        # Verificar palavras-chave ou nomes de colunas
-        related = any(kw in q_lower for kw in keywords)
-        if not related:
-            for col in self.df.columns:
-                if str(col).lower() in q_lower:
-                    related = True
-                    break
-
-        if not related:
-            return "Pergunta inválida. Por favor, faça uma pergunta relacionada ao arquivo CSV carregado."
+        # 2) Usar LLM para verificar a relevância da pergunta
+        if not self.is_question_relevant(question):
+            return "Desculpe, só posso responder a perguntas relacionadas ao arquivo CSV carregado..."
 
         # 3) Preparar contexto do DataFrame
         try:
             df_info = f"""
-            DataFrame com {len(self.df)} linhas e {len(self.df.columns)} colunas.
-            Colunas: {', '.join(self.df.columns.tolist())}
+            O DataFrame tem {len(self.df)} linhas e {len(self.df.columns)} colunas.
+            
+            O nome das colunas são: {', '.join(self.df.columns.tolist())}
 
             Estatísticas básicas:
             {self.df.describe(include='all').to_string()}
@@ -282,30 +363,75 @@ class CSVAIAgent:
             df_info = f"DataFrame com {len(self.df)} linhas e colunas: {', '.join(self.df.columns.tolist())}"
 
         # 4) Buscar histórico relevante (últimas interações)
-        if self.memory:
-            # Usar as últimas N interações como contexto
-            recent_memory = self.memory[-memory_top_k:]
-            memory_text = "\n".join([
-                f"P: {m['question']}\nR: {m['answer'][:300]}..." if len(
-                    m['answer']) > 300 else f"P: {m['question']}\nR: {m['answer']}"
-                for m in recent_memory
-            ])
-            history_context = f"\n\nHistórico recente:\n{memory_text}"
+        history_context = self.get_recent_history(memory_top_k)
+
+        # 5) Construir prompt
+
+        prompt = f"""Você é um especialista em análise de dados CSV. Responda à pergunta do usuário de forma clara e objetiva.
+
+        Informações do DataFrame:
+        "{df_info}"
+        
+        Histórico de perguntas e respostas:
+        "{history_context}"
+        
+        Pergunta do usuário:
+        "{question}"
+
+        """
+
+        # Gerar código python
+        code_generation_prompt = f"""
+            Você é um especialista em Python/Pandas. Sua única função é analisar dados.
+            Use a variável 'df' (o DataFrame).
+
+            Instrução: Gere APENAS o código Python (dentro de um bloco markdown 'python')
+            que responde à pergunta do usuário. O resultado final deve ser atribuído a
+            uma variável chamada 'result' ou impresso no console.
+
+            Informações do DataFrame:
+            "{df_info}"
+            
+            Histórico de perguntas e respostas:
+            "{history_context}"
+            
+            Pergunta do usuário:
+            "{question}"
+        """
+
+        code_response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Gere APENAS o código Python/Pandas."},
+                {"role": "user", "content": code_generation_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=800
+        )
+
+        generated_code = code_response.choices[0].message["content"]
+
+        # Extrair código do bloco
+        match = re.search(r"```python\n(.*?)\n```", generated_code, re.DOTALL)
+        code_to_execute = match.group(1).strip() if match else generated_code.strip()
+
+        # Executar código
+        execution_result = self.execute_code(code_to_execute)
+        is_error = execution_result.startswith("ERRO DE EXECUÇÃO")
+
+        # Verificar se resposta python será usada
+        if is_error == False:
+            # Incluir resposta da execução do python
+            print("Respondeu usando python")
+            prompt = prompt + "A resposta deve ser baseada EXCLUSIVAMENTE no resultado da execução do código Python/Pandas: " + execution_result
         else:
-            history_context = ""
+            # Não incluir
+            print("Respondeu usando linguística")
 
-        # 5) Construir prompt eficiente
-        prompt = f"""Você é um assistente especializado em análise de dados CSV. Responda em português de forma clara.
+        print("Prompt final:\n\n" + prompt)
 
-    Informações do DataFrame:
-    {df_info}
-    {history_context}
 
-    Pergunta atual: {question}
-
-    Responda de forma direta e útil, baseando-se nos dados disponíveis."""
-
-        # 6) Chamada à API
+        # 6) Usar a LLM - Resposta final
         try:
             response = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
@@ -325,6 +451,7 @@ class CSVAIAgent:
             self.add_memory(question, answer)
 
         return answer
+
 
     # ---------------------------
     # Análises básicas / gráficos
