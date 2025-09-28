@@ -10,21 +10,14 @@ import seaborn as sns
 import streamlit as st
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-
 from pandas.core.interchange.dataframe_protocol import DataFrame
-
-"""
-import os
-from dotenv import load_dotenv
-load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
-"""
 
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 # ---------------------------
 # Utilitários de CSV / decoding
 # ---------------------------
+
 def _try_decode(sample_bytes: bytes):
     """Tenta decodificar bytes com encodings comuns; retorna (texto, encoding)."""
     for enc in ("utf-8", "cp1252", "latin-1"):
@@ -33,7 +26,6 @@ def _try_decode(sample_bytes: bytes):
         except Exception:
             pass
     return sample_bytes.decode("utf-8", errors="replace"), "utf-8-replaced"
-
 
 def _is_number(s: Any) -> bool:
     """Detecta se uma string representa um número (tratando vírgulas etc.)."""
@@ -49,7 +41,6 @@ def _is_number(s: Any) -> bool:
         return True
     except Exception:
         return False
-
 
 def _detect_outer_quoted(sample_text: str, min_lines: int = 3) -> bool:
     """
@@ -68,7 +59,6 @@ def _detect_outer_quoted(sample_text: str, min_lines: int = 3) -> bool:
     ratio_inner = sum(has_inner_double) / len(sample)
     return (ratio_se >= 0.8) and (ratio_inner >= 0.5)
 
-
 def _unwrap_outer_quotes(text: str) -> str:
     lines = text.splitlines()
     new_lines = []
@@ -80,7 +70,6 @@ def _unwrap_outer_quotes(text: str) -> str:
         else:
             new_lines.append(ln)
     return "\n".join(new_lines)
-
 
 def _detect_delimiter_from_text(sample_text: str):
     """
@@ -112,58 +101,19 @@ def _detect_delimiter_from_text(sample_text: str):
         header_like = any(not _is_number(x) for x in first_fields)
         return delim, header_like
 
-
 # ---------------------------
 # Classe do Agente
 # ---------------------------
+
 class CSVAIAgent:
     def __init__(self):
         self.df: Optional[pd.DataFrame] = None
         self.memory: List[Dict[str, Any]] = []  # Apenas memória RAM
 
-    def add_memory(self, question: str, answer: str):
-        entry = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "question": question,
-            "answer": answer,
-        }
-        self.memory.append(entry)
-        # Manter só as últimas 20 interações na RAM
-        if len(self.memory) > 20:
-            self.memory = self.memory[-20:]
-
-    """
-
-    def clear_memory(self):
-        self.memory = []
-        
-    """
-
-    def get_recent_history(self, n: int = 5) -> str:
-        recent = self.memory[-n:]
-        history = "\n".join([f"Pergunta do usuário: {m['question']}\nResposta do agente: {m['answer']}\n" for m in recent])
-        return history
-
-
-    def get_context(self, df: DataFrame) -> str:
-        df_info = f"""
-        O DataFrame tem {len(self.df)} linhas e {len(self.df.columns)} colunas.
-        
-        O nome de cada coluna do DataFrame é: "{', '.join(self.df.columns.tolist())}"
-        
-        Amostra (Primeiras 3 linhas):
-        {self.df.head(3).to_string()}
-        """
-        # Limitar tamanho
-        df_info = df_info[:2000] + ("..." if len(df_info) > 2000 else "")
-
-        # Retornar
-        return df_info
-
-
     # ---------------------------
-    # Carregamento de CSV robusto
+    # Carregamento de CSV
     # ---------------------------
+
     def load_csv(self, file, sample_size: int = 8192, force_header: bool = True, **pd_read_kwargs) -> pd.DataFrame:
         """
         Carrega um CSV detectando encoding/delimiter/cabeçalho de forma robusta.
@@ -239,58 +189,150 @@ class CSVAIAgent:
 
         return df
 
-    # LLM
+    # ---------------------------
+    # Funções importantes
+    # ---------------------------
+
+    def add_memory(self, question: str, answer: str):
+        entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "question": question,
+            "answer": answer,
+        }
+        self.memory.append(entry)
+        # Manter só as últimas 20 interações na RAM
+        if len(self.memory) > 20:
+            self.memory = self.memory[-20:]
+
+    def get_recent_history(self, n: int = 20) -> str:
+        recent = self.memory[-n:]
+        history = "\n".join([f"Pergunta: {m['question']}\nResposta: {m['answer']}\n" for m in recent])
+        return history
+
+    def get_context(self, df: DataFrame) -> str:
+        # Seletor de colunas numéricas
+        numeric_cols = self.df.select_dtypes(include=['number']).columns.tolist()
+
+        # Estatísticas seletivas (apenas para colunas numéricas)
+        stats_data = {}
+        if numeric_cols:
+            # Seleciona as colunas, calcula estatísticas e formata com 2 casas decimais
+            stats_df = self.df[numeric_cols].agg(
+                ['mean', 'min', 'max', 'std']
+            ).round(2)
+
+            # Converte o DataFrame de estatísticas para uma string mais limpa
+            stats_info = stats_df.to_string(header=True, index=True)
+        else:
+            stats_info = "Nenhuma coluna numérica encontrada para estatísticas detalhadas."
+
+        df_info = f"""
+O DataFrame tem {len(self.df)} linhas e {len(self.df.columns)} colunas.
+        
+Nome e tipo das colunas:
+"{self.df.dtypes.apply(lambda dt: str(dt)).to_string()}"
+
+Amostra (Primeiras 3 linhas do DataFrame):
+"{self.df.head(3).to_string()}"
+
+Estatísticas do DataFrame:
+"{stats_info}"
+"""
+        # Limitar tamanho
+        # df_info = df_info[:2000] + ("..." if len(df_info) > 2000 else "")
+
+        # Retornar
+        return df_info
+
+    def execute_code(self, code_string: str) -> str:
+        """Executa código Python no contexto do DataFrame de forma segura."""
+        if self.df is None:
+            return "Erro: DataFrame não carregado."
+
+        # O dataframe deve estar disponível no ambiente de execução
+        local_vars = {'df': self.df}
+
+        # Captura stdout
+        old_stdout = sys.stdout
+        redirected_output = io.StringIO()
+        sys.stdout = redirected_output
+
+        try:
+            # Garante que o código é executado e o resultado final é capturado
+            exec(code_string, {}, local_vars)
+
+            # Tenta pegar a última variável/resultado, se não houver print explícito
+            result = local_vars.get('result', None) or redirected_output.getvalue().strip()
+
+            if result:
+                # Limita a saída para evitar sobrecarga de tokens (ex: print de DF completo)
+                result_str = str(result)
+                if len(result_str) > 2000:
+                    return f"Resultado (Parcial):\n{result_str[:2000]}..."
+                return f"Resultado: {result_str}"
+
+            return "Execução bem-sucedida, sem saída explícita (pode ser atribuição de variável)."
+
+        except Exception as e:
+            return f"ERRO DE EXECUÇÃO: {type(e).__name__}: {str(e)}"
+
+        finally:
+            sys.stdout = old_stdout
+
+    # ---------------------------
+    # Interagir com a LLM
+    # ---------------------------
+
     def is_question_relevant(self, question: str) -> bool:
-        """
-        Usa o LLM para classificar a relevância da pergunta em uma escala de 1 a 10.
-        """
+
+        # Usa o LLM para classificar a relevância da pergunta em uma escala de 1 a 10.
+
         if self.df is None:
             return False
 
         # df_cols = ", ".join(self.df.columns.tolist())
         # df_shape = f"{len(self.df)} linhas, {len(self.df.columns)} colunas."
 
-        prompt_relevance = f"""
-        Você é um avaliador numérico de relevância.
-        
-        Tarefa: Avalie a relevância da pergunta do usuário para o arquivo CSV em uma escala de 1 (totalmente irrelevante) a 10 (altamente relevante).
+        prompt_relevance = f"""Você é um avaliador numérico de relevância.
 
-        Informações sobre o DataFrame:
-        "{self.get_context(self.df)}"
-        
-        Histórico de perguntas e respostas:
-        "{self.get_recent_history()}"
-        
-        Qualquer referência explícita a um nome de coluna é relevante.
-        
-        Perguntas consideradas altamente relevantes:
-        "Quais são os tipos de dados (numéricos, categóricos) do arquivo/planilha?"
-        "Qual a distribuição de cada variável (histogramas, distribuições)?"
-        "Qual o intervalo de cada variável (mínimo, máximo)?"
-        "Quais são as medidas de tendência central (média, mediana)?"
-        "Qual a variabilidade dos dados (desvio padrão, variância)?"
-        "Existem padrões ou tendências temporais?"
-        "Quais os valores mais frequentes ou menos frequentes?"
-        "Existem agrupamentos (clusters) nos dados?"
-        "Existem valores atípicos nos dados?"
-        "Como esses outliers afetam a análise?"
-        "Podem ser removidos, transformados ou investigados?"
-        "Como as variáveis estão relacionadas umas com as outras? (Gráficos de dispersão, tabelas cruzadas)"
-        "Existe correlação entre as variáveis?"
-        "Quais variáveis parecem ter maior ou menor influência sobre outras?"
-        "Qual conclusão você pode tirar deste arquivo?"
-        "Quantas linhas tem o arquivo/planilha?"
-        "Quantas colunas tem o arquivo/planilha?"
-        "Qual o tamanho do arquivo/planilha?"
-        "Qual sua conclusão sobre o arquivo/planilha?"
-        "Com base no histórico de perguntas, qual sua conclusão?"
-        "Quais foram as perguntas feitas até agora?"
+Tarefa: Avalie a relevância da pergunta do usuário para o arquivo CSV em uma escala de 1 (totalmente irrelevante) a 10 (altamente relevante).
 
-        Instrução: Responda APENAS com um número inteiro entre 1 e 10 (exemplo de resposta: 5).
+Informações sobre o DataFrame do CSV:
+"{self.get_context(self.df)}"
 
-        Pergunta do usuário:
-        "{question}"
-        """
+Histórico de perguntas e respostas:
+"{self.get_recent_history()}"
+
+Perguntas consideradas altamente relevantes:
+"- O arquivo (...)
+- A planilha (...)
+- Quais são os tipos de dados (numéricos, categóricos, etc.) do arquivo/planilha?
+- Qual a distribuição de cada variável (histogramas, distribuições)?
+- Qual o intervalo de cada variável (mínimo, máximo)?
+- Quais são as medidas de tendência central (média, mediana)?
+- Qual a variabilidade dos dados (desvio padrão, variância)?
+- Existem padrões ou tendências temporais?
+- Quais os valores mais frequentes ou menos frequentes?
+- Existem agrupamentos (clusters) nos dados?
+- Existem valores atípicos nos dados?
+- Como esses outliers afetam a análise?
+- Podem ser removidos, transformados ou investigados?
+- Como as variáveis estão relacionadas umas com as outras? (Gráficos de dispersão, tabelas cruzadas)
+- Existe correlação entre as variáveis?
+- Quais variáveis parecem ter maior ou menor influência sobre outras?
+- Qual conclusão você pode tirar deste arquivo?
+- Quantas linhas tem o arquivo/planilha?
+- Quantas colunas tem o arquivo/planilha?
+- Qual o tamanho do arquivo/planilha?
+- Qual sua conclusão sobre o arquivo/planilha?
+- Com base no histórico de perguntas, qual sua conclusão?
+- Quais foram as perguntas feitas até agora?"
+
+Instrução: Responda APENAS com um número inteiro entre 1 e 10 (exemplo de resposta: 5).
+
+Pergunta do usuário:
+"{question}"
+"""
 
         try:
             # Manter temperatura baixa para obter um número estável
@@ -320,110 +362,48 @@ class CSVAIAgent:
             # Em caso de falha, é mais seguro não responder
             return False
 
-
-    def execute_code(self, code_string: str) -> str:
-        """Executa código Python no contexto do DataFrame de forma segura."""
-        if self.df is None:
-            return "Erro: DataFrame não carregado."
-        
-        # O dataframe deve estar disponível no ambiente de execução
-        local_vars = {'df': self.df}
-        
-        # Captura stdout
-        old_stdout = sys.stdout
-        redirected_output = io.StringIO()
-        sys.stdout = redirected_output
-        
-        try:
-            # Garante que o código é executado e o resultado final é capturado
-            exec(code_string, {}, local_vars)
-            
-            # Tenta pegar a última variável/resultado, se não houver print explícito
-            result = local_vars.get('result', None) or redirected_output.getvalue().strip()
-            
-            if result:
-                # Limita a saída para evitar sobrecarga de tokens (ex: print de DF completo)
-                result_str = str(result)
-                if len(result_str) > 2000:
-                    return f"Resultado (Parcial):\n{result_str[:2000]}..."
-                return f"Resultado:\n{result_str}"
-            
-            return "Execução bem-sucedida, sem saída explícita (pode ser atribuição de variável)."
-
-        except Exception as e:
-            return f"ERRO DE EXECUÇÃO: {type(e).__name__}: {str(e)}"
-            
-        finally:
-            sys.stdout = old_stdout
-
-
     def ask_chatgpt(self, question: str) -> str:
 
         if not isinstance(question, str):
             question = str(question)
 
-        # 1) Verificar se há CSV carregado
+        # Verificar se há CSV carregado
         if self.df is None:
             return "Por favor, carregue um arquivo CSV antes de fazer perguntas."
 
-        # 2) Usar LLM para verificar a relevância da pergunta
+        # Usar LLM para verificar a relevância da pergunta
         if not self.is_question_relevant(question):
             return "Desculpe, só posso responder a perguntas relacionadas ao arquivo CSV carregado..."
 
-        '''
-        # 3) Preparar contexto do DataFrame
-        try:
-            df_info = f"""
-            O DataFrame tem {len(self.df)} linhas e {len(self.df.columns)} colunas.
-            
-            O nome das colunas são: {', '.join(self.df.columns.tolist())}
+        # Construir prompt final
+        prompt = f"""Você é especialista em análise de dados de arquivo CSV. Responda à pergunta do usuário de maneira objetiva.
 
-            Estatísticas básicas:
-            {self.df.describe(include='all').to_string()}
-            """
-            # Limitar tamanho
-            df_info = df_info[:2000] + ("..." if len(df_info) > 2000 else "")
-        except Exception:
-            df_info = f"DataFrame com {len(self.df)} linhas e colunas: {', '.join(self.df.columns.tolist())}"
-        '''
+Informações sobre o DataFrame:
+"{self.get_context(self.df)}"
 
-        '''
-        # 4) Buscar histórico relevante (últimas interações)
-        history_context = self.get_recent_history(memory_top_k)
-        '''
+Histórico de perguntas e respostas:
+"{self.get_recent_history()}"
 
-        # 5) Construir prompt final
+Pergunta do usuário:
+"{question}"
+"""
 
-        prompt = f"""Você é especialista em análise de dados de uma planilha CSV. Use a variável 'df' (o DataFrame extraído do CSV). Responda à pergunta do usuário de forma clara e objetiva.
+        # Construir prompt de geração de código Python
+        code_generation_prompt = f"""Você é um especialista em gerar código Python de alta qualidade.
 
-        Informações sobre o DataFrame:
-        "{self.get_context(self.df)}"
-        
-        Histórico de perguntas e respostas:
-        "{self.get_recent_history()}"
-        
-        Pergunta do usuário:
-        "{question}"
+Informações sobre o DataFrame:
+"{self.get_context(self.df)}"
 
-        """
+Histórico de perguntas e respostas:
+"{self.get_recent_history()}"
 
-        # Gerar código python
-        code_generation_prompt = f"""
-            Você é um especialista em Python/Pandas. Sua única função é analisar dados. Use a variável 'df' (o DataFrame extraído do CSV).
+Instrução: Gere APENAS o código Python (dentro de um bloco markdown 'python')
+que responde à pergunta do usuário, de preferência usando a biblioteca Pandas. Use a variável 'df' (o DataFrame extraído do CSV)
+como base de dados para análise. O resultado final deve ser atribuído a uma variável chamada 'result' ou impresso no console.
 
-            Instrução: Gere APENAS o código Python (dentro de um bloco markdown 'python')
-            que responde à pergunta do usuário. O resultado final deve ser atribuído a
-            uma variável chamada 'result' ou impresso no console.
-
-            Informações sobre o DataFrame:
-            "{self.get_context(self.df)}"
-            
-            Histórico de perguntas e respostas:
-            "{self.get_recent_history()}"
-            
-            Pergunta do usuário:
-            "{question}"
-        """
+Pergunta do usuário:
+"{question}"
+"""
 
         print("Prompt do Python:\n\n" + code_generation_prompt)
 
@@ -447,11 +427,13 @@ class CSVAIAgent:
         execution_result = self.execute_code(code_to_execute)
         is_error = execution_result.startswith("ERRO DE EXECUÇÃO")
 
+        print("Resposta do código python gerado pela LLM: " + execution_result)
+
         # Verificar se resposta python será usada
         if is_error == False:
             # Incluir resposta da execução do python
             print("Responderá usando python")
-            prompt = prompt + 'Baseie sua resposta no resultado da execução do código Python gerado pela LLM:\n"' + execution_result + '"'
+            prompt = prompt + '\nBaseie sua resposta no resultado a seguir, proveniente da execução do código Python gerado pela LLM:\n"' + execution_result + '"'
         else:
             # Não incluir
             print("Responderá usando linguística")
@@ -478,7 +460,6 @@ class CSVAIAgent:
             self.add_memory(question, answer)
 
         return answer
-
 
     # ---------------------------
     # Análises básicas / gráficos
@@ -524,7 +505,6 @@ class CSVAIAgent:
         plt.close(fig)
         return buf
 
-    # Adicionar este método à classe CSVAIAgent no agent.py
     def generate_plot_from_text(self, user_input: str):
         """
         Tenta gerar um gráfico baseado no texto do usuário.
