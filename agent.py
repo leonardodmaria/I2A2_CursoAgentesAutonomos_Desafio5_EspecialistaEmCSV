@@ -222,12 +222,11 @@ class CSVAIAgent:
             ).round(2)
 
             # Converte o DataFrame de estatísticas para uma string mais limpa
-            stats_info = stats_df.to_string(header=True, index=True)
+            stats_info = 'Principais estatísticas dos dados do CSV:\n"' + stats_df.to_string(header=True, index=True) + '"'
         else:
-            stats_info = "Nenhuma coluna numérica encontrada para estatísticas detalhadas."
+            stats_info = ""
 
-        df_info = f"""
-O DataFrame tem {len(self.df)} linhas e {len(self.df.columns)} colunas.
+        df_info = f"""O CSV tem {len(self.df)} linhas e {len(self.df.columns)} colunas.
         
 Nome e tipo das colunas:
 "{self.df.dtypes.apply(lambda dt: str(dt)).to_string()}"
@@ -235,7 +234,6 @@ Nome e tipo das colunas:
 Amostra (Primeiras 3 linhas do DataFrame):
 "{self.df.head(3).to_string()}"
 
-Estatísticas do DataFrame:
 "{stats_info}"
 """
         # Limitar tamanho
@@ -280,7 +278,7 @@ Estatísticas do DataFrame:
             sys.stdout = old_stdout
 
     # ---------------------------
-    # Interagir com a LLM
+    # Interagir com o LLM
     # ---------------------------
 
     def is_question_relevant(self, question: str) -> bool:
@@ -293,44 +291,57 @@ Estatísticas do DataFrame:
         # df_cols = ", ".join(self.df.columns.tolist())
         # df_shape = f"{len(self.df)} linhas, {len(self.df.columns)} colunas."
 
-        prompt_relevance = f"""Você é um avaliador numérico de relevância.
+        prompt_relevance = f"""Você é um avaliador de relevância de perguntas.
 
-Tarefa: Avalie a relevância da pergunta do usuário para o arquivo CSV em uma escala de 1 (totalmente irrelevante) a 10 (altamente relevante).
+TAREFA: Avalie a relevância da pergunta do usuário sobre o arquivo CSV em uma escala de 1 (totalmente irrelevante) a 10 (altamente relevante).
 
-Informações sobre o DataFrame do CSV:
+Informações sobre o arquivo CSV:
 "{self.get_context(self.df)}"
 
 Histórico de perguntas e respostas:
 "{self.get_recent_history()}"
 
-Perguntas consideradas altamente relevantes:
+Alguns exemplos de perguntas consideradas altamente relevantes abaixo - "(...)" significa texto em aberto:
+
+1) Perguntas gerais sobre o CSV ->
 "- O arquivo (...)
 - A planilha (...)
+- Quantas linhas têm?
+- Quantas colunas têm?
+- Qual o tamanho?
+- Do que se trata?
+- Qual é o assunto/tema?
+
+2) Perguntas de Descrição dos Dados ->
 - Quais são os tipos de dados (numéricos, categóricos, etc.) do arquivo/planilha?
 - Qual a distribuição de cada variável (histogramas, distribuições)?
 - Qual o intervalo de cada variável (mínimo, máximo)?
 - Quais são as medidas de tendência central (média, mediana)?
 - Qual a variabilidade dos dados (desvio padrão, variância)?
+
+3) Perguntas de Identificação de Padrões e Tendência ->
 - Existem padrões ou tendências temporais?
 - Quais os valores mais frequentes ou menos frequentes?
 - Existem agrupamentos (clusters) nos dados?
+
+4) Perguntas de Detecção de Anomalias (Outliers) ->
 - Existem valores atípicos nos dados?
 - Como esses outliers afetam a análise?
 - Podem ser removidos, transformados ou investigados?
+
+5) Perguntas de Relações entre Variáveis ->
 - Como as variáveis estão relacionadas umas com as outras? (Gráficos de dispersão, tabelas cruzadas)
 - Existe correlação entre as variáveis?
 - Quais variáveis parecem ter maior ou menor influência sobre outras?
-- Qual conclusão você pode tirar deste arquivo?
-- Quantas linhas tem o arquivo/planilha?
-- Quantas colunas tem o arquivo/planilha?
-- Qual o tamanho do arquivo/planilha?
+
+6) Perguntas de conclusão/resumo ->
 - Qual sua conclusão sobre o arquivo/planilha?
 - Com base no histórico de perguntas, qual sua conclusão?
 - Quais foram as perguntas feitas até agora?"
 
-Instrução: Responda APENAS com um número inteiro entre 1 e 10 (exemplo de resposta: 5).
+INSTRUÇÃO: Responda APENAS com um número inteiro entre 1 e 10 (exemplo de resposta: 5).
 
-Pergunta do usuário:
+PERGUNTA DO USUÁRIO:
 "{question}"
 """
 
@@ -339,10 +350,10 @@ Pergunta do usuário:
             response = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "Você é um avaliador numérico de relevância."},
+                    {"role": "system", "content": "Você é um avaliador de relevância de perguntas."},
                     {"role": "user", "content": prompt_relevance},
                 ],
-                temperature=0.0,
+                temperature=0.1,
                 max_tokens=3  # Suficiente para um número (ex: 10)
             )
             answer = response.choices[0].message["content"].strip()
@@ -354,7 +365,7 @@ Pergunta do usuário:
                 print("Prompt da avaliação da pergunta:\n\n" + prompt_relevance)
                 print("Relevância da pergunta (de 0 a 10): " + str(relevance_score))
                 # Defina o limiar de corte
-                return relevance_score >= 3
+                return relevance_score >= 4
 
             return False  # Se não conseguir extrair o número
 
@@ -375,45 +386,36 @@ Pergunta do usuário:
         if not self.is_question_relevant(question):
             return "Desculpe, só posso responder a perguntas relacionadas ao arquivo CSV carregado..."
 
-        # Construir prompt final
-        prompt = f"""Você é especialista em análise de dados de arquivo CSV. Responda à pergunta do usuário de maneira objetiva.
-
-Informações sobre o DataFrame:
-"{self.get_context(self.df)}"
-
-Histórico de perguntas e respostas:
-"{self.get_recent_history()}"
-
-Pergunta do usuário:
-"{question}"
-"""
-
         # Construir prompt de geração de código Python
-        code_generation_prompt = f"""Você é um especialista em gerar código Python de alta qualidade.
+        code_generation_prompt = f"""Você é especialista em programação Python.
+        
+TAREFA: Gerar código-fonte Python que responda à pergunta do usuário sobre o CSV.
 
-Informações sobre o DataFrame:
+Informações sobre o arquivo CSV:
 "{self.get_context(self.df)}"
 
 Histórico de perguntas e respostas:
 "{self.get_recent_history()}"
 
-Instrução: Gere APENAS o código Python (dentro de um bloco markdown 'python')
-que responde à pergunta do usuário, de preferência usando a biblioteca Pandas. Use a variável 'df' (o DataFrame extraído do CSV)
+INSTRUÇÃO: Gere APENAS o código Python (dentro de um bloco markdown 'python') que responde à pergunta do usuário
+de maneira clara e objetiva, de preferência usando a biblioteca Pandas. Use a variável 'df' (o DataFrame extraído do CSV)
 como base de dados para análise. O resultado final deve ser atribuído a uma variável chamada 'result' ou impresso no console.
 
-Pergunta do usuário:
+PERGUNTA DO USUÁRIO:
 "{question}"
 """
 
         print("Prompt do Python:\n\n" + code_generation_prompt)
 
+        # Perguntar ao LLM - Geração de código Python
+
         code_response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Gere APENAS o código Python/Pandas."},
+                {"role": "system", "content": "Você é especialista em programação Python."},
                 {"role": "user", "content": code_generation_prompt},
             ],
-            temperature=0.0,
+            temperature=0.1,
             max_tokens=800
         )
 
@@ -423,29 +425,46 @@ Pergunta do usuário:
         match = re.search(r"```python\n(.*?)\n```", generated_code, re.DOTALL)
         code_to_execute = match.group(1).strip() if match else generated_code.strip()
 
-        # Executar código
+        # Executar código Python
         execution_result = self.execute_code(code_to_execute)
         is_error = execution_result.startswith("ERRO DE EXECUÇÃO")
 
         print("Resposta do código python gerado pela LLM: " + execution_result)
 
+        # Construir prompt final
+        prompt = f"""Você é especialista em análise de dados de arquivo CSV.
+
+TAREFA: Responda à pergunta do usuário sobre o arquivo CSV.
+
+Informações sobre o arquivo CSV:
+"{self.get_context(self.df)}"
+
+Histórico de perguntas e respostas:
+"{self.get_recent_history()}"
+
+INSTRUÇÃO: Responda à pergunta do usuário de maneira clara e objetiva.
+
+PERGUNTA DO USUÁRIO:
+"{question}"
+"""
+
         # Verificar se resposta python será usada
         if is_error == False:
-            # Incluir resposta da execução do python
-            print("Responderá usando python")
-            prompt = prompt + '\nBaseie sua resposta no resultado a seguir, proveniente da execução do código Python gerado pela LLM:\n"' + execution_result + '"'
+            # Incluir resposta da execução do Python no prompt final
+            print("Responderá usando Python")
+            prompt = prompt + '\nBaseie sua resposta no resultado a seguir, originado da execução do código Python:\n"' + execution_result + '"'
         else:
             # Não incluir
             print("Responderá usando linguística")
 
         print("Prompt final:\n\n" + prompt)
 
-        # 6) Usar a LLM - Resposta final
+        # Perguntar ao LLM - Resposta final
         try:
             response = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "Você é especialista em análise de dados de uma planilha CSV."},
+                    {"role": "system", "content": "Você é especialista em análise de dados de arquivo CSV."},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.1,  # Baixa temperatura para respostas consistentes
@@ -455,7 +474,7 @@ Pergunta do usuário:
         except Exception as e:
             answer = f"Erro ao processar a pergunta: {str(e)}"
 
-        # 7) Salvar na memória (apenas se a resposta for válida)
+        # Salvar na memória (apenas se a resposta for válida)
         if not answer.startswith("Erro ao processar"):
             self.add_memory(question, answer)
 
